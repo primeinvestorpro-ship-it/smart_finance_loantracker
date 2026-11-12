@@ -3,6 +3,7 @@ import '../models/loan_model.dart';
 import '../models/transaction_model.dart';
 import '../services/local_database_service.dart';
 import '../services/notification_service.dart';
+import '../services/sms_reader_service.dart';
 import '../core/finance_engine.dart';
 
 // --- Database & Repository Provider ---
@@ -16,12 +17,15 @@ class LoansNotifier extends StateNotifier<AsyncValue<List<LoanModel>>> {
 
   LoansNotifier(this._db) : super(const AsyncValue.loading()) {
     loadLoans();
+    // Listen to real-time incoming SMS updates
+    SmsReaderService.instance.onNewFinancialMessage.listen((_) {
+      loadLoans();
+    });
   }
 
   Future<void> loadLoans() async {
     try {
       state = const AsyncValue.loading();
-      await _db.seedInitialDataIfEmpty();
       final loans = await _db.getAllLoans();
       state = AsyncValue.data(loans);
     } catch (e, st) {
@@ -31,7 +35,6 @@ class LoansNotifier extends StateNotifier<AsyncValue<List<LoanModel>>> {
 
   Future<void> addLoan(LoanModel loan) async {
     await _db.insertLoan(loan);
-    // Schedule multi-stage EMI alerts (T-7 to Due Date)
     await NotificationService.instance.scheduleMultiStageEmiRenameReminders(loan);
     await loadLoans();
   }
@@ -44,6 +47,11 @@ class LoansNotifier extends StateNotifier<AsyncValue<List<LoanModel>>> {
 
   Future<void> deleteLoan(String id) async {
     await _db.deleteLoan(id);
+    await loadLoans();
+  }
+
+  Future<void> clearAll() async {
+    await _db.clearAllLoans();
     await loadLoans();
   }
 }
@@ -59,6 +67,10 @@ class TransactionsNotifier extends StateNotifier<AsyncValue<List<TransactionMode
 
   TransactionsNotifier(this._db) : super(const AsyncValue.loading()) {
     loadTransactions();
+    // Listen to real-time incoming SMS updates
+    SmsReaderService.instance.onNewFinancialMessage.listen((_) {
+      loadTransactions();
+    });
   }
 
   Future<void> loadTransactions() async {
@@ -78,6 +90,11 @@ class TransactionsNotifier extends StateNotifier<AsyncValue<List<TransactionMode
 
   Future<void> deleteTransaction(String id) async {
     await _db.deleteTransaction(id);
+    await loadTransactions();
+  }
+
+  Future<void> clearAll() async {
+    await _db.clearAllTransactions();
     await loadTransactions();
   }
 }

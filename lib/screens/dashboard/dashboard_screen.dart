@@ -5,12 +5,71 @@ import 'package:fl_chart/fl_chart.dart';
 import '../../models/loan_model.dart';
 import '../../providers/finance_providers.dart';
 import '../../services/notification_service.dart';
+import '../../services/sms_reader_service.dart';
+import '../../services/gemini_extraction_service.dart';
+import '../../services/auth_service.dart';
+import '../auth/auth_lock_screen.dart';
 
-class DashboardScreen extends ConsumerWidget {
+class DashboardScreen extends ConsumerStatefulWidget {
   const DashboardScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+  String _aiInsights = '';
+  bool _isLoadingAi = false;
+  bool _isSyncingSms = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchDynamicAiInsights();
+  }
+
+  Future<void> _fetchDynamicAiInsights() async {
+    final metrics = ref.read(dashboardMetricsProvider);
+    setState(() => _isLoadingAi = true);
+
+    final insights = await GeminiExtractionService.generateFinancialInsights(
+      totalDebt: metrics.totalOutstandingDebt,
+      monthlyEmi: metrics.totalMonthlyEmi,
+      monthlyIncome: metrics.monthlyIncome,
+      monthlyExpenses: metrics.monthlyExpenses,
+      activeLoansCount: metrics.activeLoansCount,
+      highestInterestLoan: metrics.highestInterestLoan?.name ?? 'None',
+      highestRate: metrics.highestInterestLoan?.annualInterestRate ?? 0.0,
+    );
+
+    if (mounted) {
+      setState(() {
+        _aiInsights = insights;
+        _isLoadingAi = false;
+      });
+    }
+  }
+
+  Future<void> _syncLocalSmsInbox() async {
+    setState(() => _isSyncingSms = true);
+    final count = await SmsReaderService.instance.scanExistingInbox();
+    await ref.read(loansProvider.notifier).loadLoans();
+    await ref.read(transactionsProvider.notifier).loadTransactions();
+    await _fetchDynamicAiInsights();
+
+    if (mounted) {
+      setState(() => _isSyncingSms = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(count > 0 ? 'Imported $count financial items from SMS!' : 'Inbox scanned. No new loan/expense SMS found.'),
+          backgroundColor: const Color(0xFF10B981),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final metrics = ref.watch(dashboardMetricsProvider);
     final loansAsync = ref.watch(loansProvider);
     final inr = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0);
@@ -20,37 +79,28 @@ class DashboardScreen extends ConsumerWidget {
         title: const Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Smart Finance',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            Text(
-              'Loan Portfolio & Cash Flow',
-              style: TextStyle(fontSize: 12, color: Colors.grey),
-            ),
+            Text('Smart Finance', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            Text('Auto-Synced Financial Intelligence', style: TextStyle(fontSize: 12, color: Colors.grey)),
           ],
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.notification_add_outlined),
-            tooltip: 'Send Test 7-Day & 1-Day EMI Alerts',
+            icon: _isSyncingSms
+                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.sync_rounded),
+            tooltip: 'Sync SMS Inbox Now',
+            onPressed: _isSyncingSms ? null : _syncLocalSmsInbox,
+          ),
+          IconButton(
+            icon: const Icon(Icons.lock_outline),
+            tooltip: 'Lock App',
             onPressed: () async {
-              if (metrics.nextUpcomingEmiLoan != null) {
-                await NotificationService.instance.showTestReminderNow(
-                  loanName: metrics.nextUpcomingEmiLoan!.name,
-                  emiAmount: metrics.nextUpcomingEmiLoan!.emiAmount,
-                  daysLeft: metrics.nextUpcomingEmiLoan!.daysUntilNextEmi,
+              await AuthService.instance.logout();
+              if (context.mounted) {
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(builder: (_) => const AuthLockScreen(isRegistration: false)),
                 );
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        'Reminder triggered for ${metrics.nextUpcomingEmiLoan!.name} (T-${metrics.nextUpcomingEmiLoan!.daysUntilNextEmi} days)',
-                      ),
-                      backgroundColor: const Color(0xFF10B981),
-                    ),
-                  );
-                }
               }
             },
           ),
@@ -60,38 +110,140 @@ class DashboardScreen extends ConsumerWidget {
         onRefresh: () async {
           await ref.read(loansProvider.notifier).loadLoans();
           await ref.read(transactionsProvider.notifier).loadTransactions();
+          await _fetchDynamicAiInsights();
         },
         child: ListView(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           children: [
-            // 1. Next Upcoming EMI Alert Banner (Week-before & Due-date status)
+            // 1. Next Upcoming EMI Alert Banner
             if (metrics.nextUpcomingEmiLoan != null)
               _buildUpcomingEmiBanner(context, metrics.nextUpcomingEmiLoan!, inr),
 
             const SizedBox(height: 16),
 
-            // 2. Financial Overview Hero Cards
+            // 2. Real-Time SMS Auto-Update Banner
+            _buildSmsAutoSyncStatusCard(),
+
+            const SizedBox(height: 16),
+
+            // 3. Dynamic Gemini AI Analysis Card
+            _buildDynamicAiAnalysisCard(),
+
+            const SizedBox(height: 20),
+
+            // 4. Financial Overview Hero Cards
             _buildFinancialOverviewGrid(metrics, inr),
 
             const SizedBox(height: 20),
 
-            // 3. Debt Analytics Card
+            // 5. Debt Analytics Card
             _buildDebtAnalyticsCard(metrics, inr),
 
             const SizedBox(height: 20),
 
-            // 4. Interactive Portfolio Distribution Chart
+            // 6. Interactive Portfolio Distribution Chart
             _buildPortfolioDonutChart(loansAsync, inr),
 
             const SizedBox(height: 20),
 
-            // 5. Highest Interest First Spotlight (Avalanche Candidate)
+            // 7. Highest Interest First Spotlight
             if (metrics.highestInterestLoan != null)
               _buildHighestInterestSpotlight(context, metrics.highestInterestLoan!, inr),
 
             const SizedBox(height: 40),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildSmsAutoSyncStatusCard() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E293B),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF10B981).withOpacity(0.3)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF10B981).withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.mark_email_read_outlined, color: Color(0xFF10B981), size: 20),
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Live SMS Auto-Detection Active',
+                  style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                ),
+                Text(
+                  'Bank loans, EMIs & transaction alerts update automatically as soon as SMS arrives.',
+                  style: TextStyle(color: Colors.grey, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDynamicAiAnalysisCard() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF132238), Color(0xFF1E293B)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF06B6D4).withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.auto_awesome, color: Color(0xFF06B6D4), size: 20),
+                  SizedBox(width: 8),
+                  Text(
+                    'Gemini AI Dynamic Analysis',
+                    style: TextStyle(color: Color(0xFF06B6D4), fontWeight: FontWeight.bold, fontSize: 14),
+                  ),
+                ],
+              ),
+              IconButton(
+                icon: const Icon(Icons.refresh, size: 18, color: Colors.grey),
+                tooltip: 'Refresh Analysis',
+                onPressed: _fetchDynamicAiInsights,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          _isLoadingAi
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(12.0),
+                    child: CircularProgressIndicator(color: Color(0xFF06B6D4)),
+                  ),
+                )
+              : Text(
+                  _aiInsights,
+                  style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
+                ),
+        ],
       ),
     );
   }
@@ -112,13 +264,6 @@ class DashboardScreen extends ConsumerWidget {
       decoration: BoxDecoration(
         color: bannerBg,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: bannerBg.withOpacity(0.35),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
       ),
       child: Row(
         children: [
@@ -143,42 +288,21 @@ class DashboardScreen extends ConsumerWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      isTomorrowOrToday
-                          ? 'URGENT: EMI DUE SOON'
-                          : 'UPCOMING EMI (7-DAY WINDOW)',
-                      style: const TextStyle(
-                        color: Colors.white70,
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 0.8,
-                      ),
+                      isTomorrowOrToday ? 'URGENT: EMI DUE SOON' : 'UPCOMING EMI (7-DAY WINDOW)',
+                      style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold),
                     ),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Colors.white24,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
+                      decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(12)),
                       child: Text(
                         daysLeft == 0 ? 'Today' : '$daysLeft days left',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
+                        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
                       ),
                     ),
                   ],
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  loan.name,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                Text(loan.name, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
                 Text(
                   '${inr.format(loan.emiAmount)} debit scheduled on ${DateFormat('dd MMM').format(loan.nextEmiDate)}',
                   style: const TextStyle(color: Colors.white, fontSize: 13),
@@ -195,10 +319,7 @@ class DashboardScreen extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Financial Overview',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-        ),
+        const Text('Financial Overview', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
         const SizedBox(height: 12),
         Row(
           children: [
@@ -267,27 +388,13 @@ class DashboardScreen extends ConsumerWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Icon(icon, color: accentColor, size: 22),
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(color: accentColor, shape: BoxShape.circle),
-              ),
+              Container(width: 8, height: 8, decoration: BoxDecoration(color: accentColor, shape: BoxShape.circle)),
             ],
           ),
           const SizedBox(height: 12),
-          Text(
-            title,
-            style: const TextStyle(color: Colors.grey, fontSize: 12),
-          ),
+          Text(title, style: const TextStyle(color: Colors.grey, fontSize: 12)),
           const SizedBox(height: 4),
-          Text(
-            value,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
+          Text(value, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
         ],
       ),
     );
@@ -296,17 +403,11 @@ class DashboardScreen extends ConsumerWidget {
   Widget _buildDebtAnalyticsCard(DashboardMetrics metrics, NumberFormat inr) {
     return Container(
       padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E293B),
-        borderRadius: BorderRadius.circular(16),
-      ),
+      decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Debt Profile & Ratio',
-            style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-          ),
+          const Text('Debt Profile & Ratio', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
           const SizedBox(height: 14),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -316,9 +417,7 @@ class DashboardScreen extends ConsumerWidget {
               _buildStatItem(
                 'Safety Status',
                 metrics.debtToIncomeRatio < 40 ? 'Healthy' : 'High Burden',
-                color: metrics.debtToIncomeRatio < 40
-                    ? const Color(0xFF10B981)
-                    : const Color(0xFFEF4444),
+                color: metrics.debtToIncomeRatio < 40 ? const Color(0xFF10B981) : const Color(0xFFEF4444),
               ),
             ],
           ),
@@ -333,14 +432,7 @@ class DashboardScreen extends ConsumerWidget {
       children: [
         Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12)),
         const SizedBox(height: 4),
-        Text(
-          value,
-          style: TextStyle(
-            color: color ?? Colors.white,
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
+        Text(value, style: TextStyle(color: color ?? Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
       ],
     );
   }
@@ -348,7 +440,15 @@ class DashboardScreen extends ConsumerWidget {
   Widget _buildPortfolioDonutChart(AsyncValue<List<LoanModel>> loansAsync, NumberFormat inr) {
     return loansAsync.when(
       data: (loans) {
-        if (loans.isEmpty) return const SizedBox.shrink();
+        if (loans.isEmpty) {
+          return Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
+            child: const Center(
+              child: Text('No active loans detected. Tap Sync SMS to scan messages.', style: TextStyle(color: Colors.grey)),
+            ),
+          );
+        }
 
         final colors = [
           const Color(0xFF10B981),
@@ -366,40 +466,20 @@ class DashboardScreen extends ConsumerWidget {
             title: '${loan.annualInterestRate}%',
             color: colors[index % colors.length],
             radius: 40,
-            titleStyle: const TextStyle(
-              color: Colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
-            ),
+            titleStyle: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
           );
         }).toList();
 
         return Container(
           padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1E293B),
-            borderRadius: BorderRadius.circular(16),
-          ),
+          decoration: BoxDecoration(color: const Color(0xFF1E293B), borderRadius: BorderRadius.circular(16)),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                'Loan Distribution & Interest Rates',
-                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
-              ),
+              const Text('Loan Distribution & Interest Rates', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
               const SizedBox(height: 20),
-              SizedBox(
-                height: 180,
-                child: PieChart(
-                  PieChartData(
-                    sections: sections,
-                    sectionsSpace: 2,
-                    centerSpaceRadius: 40,
-                  ),
-                ),
-              ),
+              SizedBox(height: 180, child: PieChart(PieChartData(sections: sections, sectionsSpace: 2, centerSpaceRadius: 40))),
               const SizedBox(height: 12),
-              // Legends
               Wrap(
                 spacing: 12,
                 runSpacing: 8,
@@ -409,19 +489,9 @@ class DashboardScreen extends ConsumerWidget {
                   return Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Container(
-                        width: 10,
-                        height: 10,
-                        decoration: BoxDecoration(
-                          color: colors[idx % colors.length],
-                          shape: BoxShape.circle,
-                        ),
-                      ),
+                      Container(width: 10, height: 10, decoration: BoxDecoration(color: colors[idx % colors.length], shape: BoxShape.circle)),
                       const SizedBox(width: 6),
-                      Text(
-                        '${l.name} (${l.annualInterestRate}%)',
-                        style: const TextStyle(color: Colors.white70, fontSize: 11),
-                      ),
+                      Text('${l.name} (${l.annualInterestRate}%)', style: const TextStyle(color: Colors.white70, fontSize: 11)),
                     ],
                   );
                 }).toList(),
@@ -439,11 +509,7 @@ class DashboardScreen extends ConsumerWidget {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFF2C1E3C), Color(0xFF1E293B)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
+        color: const Color(0xFF1E293B),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: const Color(0xFFEF4444).withOpacity(0.4)),
       ),
@@ -457,14 +523,7 @@ class DashboardScreen extends ConsumerWidget {
                 children: [
                   Icon(Icons.flash_on, color: Color(0xFFEF4444), size: 20),
                   SizedBox(width: 6),
-                  Text(
-                    'Highest Interest Rate Alert',
-                    style: TextStyle(
-                      color: Color(0xFFEF4444),
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+                  Text('Highest Interest Rate Alert', style: TextStyle(color: Color(0xFFEF4444), fontSize: 13, fontWeight: FontWeight.bold)),
                 ],
               ),
               Container(
@@ -473,31 +532,14 @@ class DashboardScreen extends ConsumerWidget {
                   color: const Color(0xFFEF4444).withOpacity(0.2),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Text(
-                  '${loan.annualInterestRate}% p.a.',
-                  style: const TextStyle(
-                    color: Color(0xFFEF4444),
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                child: Text('${loan.annualInterestRate}% p.a.', style: const TextStyle(color: Color(0xFFEF4444), fontSize: 12, fontWeight: FontWeight.bold)),
               ),
             ],
           ),
           const SizedBox(height: 10),
-          Text(
-            loan.name,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
+          Text(loan.name, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 4),
-          Text(
-            'Outstanding: ${inr.format(loan.currentOutstanding)} • Recommended for Avalanche Prepayment Priority',
-            style: const TextStyle(color: Colors.grey, fontSize: 12),
-          ),
+          Text('Outstanding: ${inr.format(loan.currentOutstanding)} • Recommended for Avalanche Prepayment Priority', style: const TextStyle(color: Colors.grey, fontSize: 12)),
         ],
       ),
     );

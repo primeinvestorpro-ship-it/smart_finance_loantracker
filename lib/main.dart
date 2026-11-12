@@ -5,23 +5,38 @@ import 'screens/loans/loans_list_screen.dart';
 import 'screens/loans/repayment_simulator_screen.dart';
 import 'screens/transactions/transactions_screen.dart';
 import 'screens/scanner/document_scanner_screen.dart';
+import 'screens/auth/auth_lock_screen.dart';
 import 'core/app_theme.dart';
 import 'services/notification_service.dart';
+import 'services/sms_reader_service.dart';
+import 'services/auth_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await NotificationService.instance.initialize();
   await NotificationService.instance.requestPermissions();
 
+  // Initialize background & foreground SMS auto-update listener
+  await SmsReaderService.instance.startListening();
+
+  final isRegistered = await AuthService.instance.isUserRegistered();
+  final isLoggedIn = await AuthService.instance.isLoggedIn();
+
   runApp(
-    const ProviderScope(
-      child: SmartFinanceApp(),
+    ProviderScope(
+      child: SmartFinanceApp(
+        initialScreen: !isRegistered
+            ? const AuthLockScreen(isRegistration: true)
+            : (!isLoggedIn ? const AuthLockScreen(isRegistration: false) : const MainNavigationShell()),
+      ),
     ),
   );
 }
 
 class SmartFinanceApp extends StatelessWidget {
-  const SmartFinanceApp({super.key});
+  final Widget initialScreen;
+
+  const SmartFinanceApp({super.key, required this.initialScreen});
 
   @override
   Widget build(BuildContext context) {
@@ -30,8 +45,8 @@ class SmartFinanceApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
-      themeMode: ThemeMode.dark, // Default to sleek dark mode
-      home: const MainNavigationShell(),
+      themeMode: ThemeMode.dark,
+      home: initialScreen,
     );
   }
 }
